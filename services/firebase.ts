@@ -1,6 +1,7 @@
 import { initializeApp, getApps, getApp } from "firebase/app";
 import { getFirestore, Firestore } from "firebase/firestore";
 import { getAuth, Auth } from "firebase/auth";
+import { getStorage, FirebaseStorage } from "firebase/storage";
 
 // Clave para guardar en el navegador (por si quieres sobreescribirla en el futuro)
 const STORAGE_KEY = 'barrio_firebase_config';
@@ -19,6 +20,7 @@ const DEFAULT_CONFIG = {
 let app;
 let db: Firestore | null = null;
 let auth: Auth | null = null;
+let storage: FirebaseStorage | null = null;
 
 // Inicialización de Firebase
 const loadFirebase = () => {
@@ -44,6 +46,7 @@ const loadFirebase = () => {
     }
     db = getFirestore(app);
     auth = getAuth(app);
+    storage = getStorage(app);
     console.log("Firebase conectado exitosamente a:", configToUse.projectId);
   } catch (e) {
     console.error("Error al iniciar Firebase:", e);
@@ -53,7 +56,7 @@ const loadFirebase = () => {
 // Ejecutar carga inicial
 loadFirebase();
 
-export { db, auth };
+export { db, auth, storage };
 
 // Helpers
 export const isConfigured = () => !!db && !!auth;

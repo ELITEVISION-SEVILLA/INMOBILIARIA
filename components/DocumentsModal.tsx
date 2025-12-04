@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
 import { Property, PropertyDoc } from '../types';
 import { useStore } from '../context/AppContext';
-import { X, FileText, Upload, Trash2, ExternalLink, Loader2 } from 'lucide-react';
+import { storage } from '../services/firebase'; // Importamos storage
+import { ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { X, FileText, Upload, Trash2, ExternalLink, Loader2, AlertCircle } from 'lucide-react';
 import { compressImage } from '../utils/imageCompressor';
 
 interface DocumentsModalProps {
@@ -13,71 +15,93 @@ const DocumentsModal: React.FC<DocumentsModalProps> = ({ property, onClose }) =>
   const { updateProperty } = useStore();
   const [newDocName, setNewDocName] = useState('');
   const [newDocType, setNewDocType] = useState<PropertyDoc['type']>('Otro');
-  const [newDocFile, setNewDocFile] = useState<string | null>(null);
-  const [isCompressing, setIsCompressing] = useState(false);
+  const [fileToUpload, setFileToUpload] = useState<File | null>(null);
+  const [isUploading, setIsUploading] = useState(false);
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) {
-      setIsCompressing(true);
-      try {
-        // Si es imagen, comprimimos. Si es PDF (no soportado por canvas), usamos base64 normal con advertencia
-        if (file.type.startsWith('image/')) {
-          const compressed = await compressImage(file);
-          setNewDocFile(compressed);
-        } else {
-          // Fallback para PDFs (Cuidado: Límite 1MB Firestore)
-          const reader = new FileReader();
-          reader.onloadend = () => {
-             const result = reader.result as string;
-             if (result.length > 1048487) {
-               alert("El archivo PDF es demasiado grande para la versión gratuita (>1MB). Por favor, usa imágenes o comprime el PDF.");
-               setNewDocFile(null);
-             } else {
-               setNewDocFile(result);
-             }
-          };
-          reader.readAsDataURL(file);
-        }
-      } catch (error) {
-        console.error("Error compressing:", error);
-        alert("Error al procesar el archivo.");
-      } finally {
-        setIsCompressing(false);
+      // Ya no limitamos el tamaño aquí para permitir archivos grandes
+      // Firebase Storage maneja gigabytes sin problemas.
+      setFileToUpload(file);
+      
+      // Sugerir nombre si está vacío
+      if (!newDocName) {
+        const nameWithoutExt = file.name.split('.').slice(0, -1).join('.');
+        setNewDocName(nameWithoutExt);
       }
     }
   };
 
-  const handleAddDocument = (e: React.FormEvent) => {
+  const handleAddDocument = async (e: React.FormEvent) => {
     e.preventDefault();
-    
-    const newDoc: PropertyDoc = {
-      id: Date.now().toString(),
-      name: newDocName,
-      type: newDocType,
-      date: new Date().toISOString().split('T')[0],
-      url: newDocFile || undefined
-    };
+    if (!fileToUpload) return;
 
-    const updatedProperty = {
-      ...property,
-      documents: [...(property.documents || []), newDoc]
-    };
+    setIsUploading(true);
+    let finalUrl = '';
 
-    updateProperty(updatedProperty);
-    
-    // Reset form
-    setNewDocName('');
-    setNewDocType('Otro');
-    setNewDocFile(null);
-    // Reset file input value manually if needed, but react state handles the logic
-    const fileInput = document.getElementById('doc-file-input') as HTMLInputElement;
-    if(fileInput) fileInput.value = '';
+    try {
+      // Opción A: Si Storage está configurado (método ideal para archivos grandes)
+      if (storage) {
+        const storageRef = ref(storage, `documents/${property.id}/${Date.now()}_${fileToUpload.name}`);
+        const snapshot = await uploadBytes(storageRef, fileToUpload);
+        finalUrl = await getDownloadURL(snapshot.ref);
+      } 
+      // Opción B: Fallback a Base64 (Solo si no hay storage, para imágenes pequeñas/legacy)
+      // Nota: Esto fallará si el archivo es > 1MB, por lo que Storage es prioritario.
+      else {
+        if (fileToUpload.size > 1000000) {
+          throw new Error("Sin Firebase Storage configurado, el límite es 1MB. Por favor revisa la configuración.");
+        }
+        
+        if (fileToUpload.type.startsWith('image/')) {
+          finalUrl = await compressImage(fileToUpload);
+        } else {
+           // Lectura manual para PDFs pequeños en modo fallback
+           finalUrl = await new Promise((resolve, reject) => {
+             const reader = new FileReader();
+             reader.onloadend = () => resolve(reader.result as string);
+             reader.onerror = reject;
+             reader.readAsDataURL(fileToUpload);
+           });
+        }
+      }
+
+      const newDoc: PropertyDoc = {
+        id: Date.now().toString(),
+        name: newDocName,
+        type: newDocType,
+        date: new Date().toISOString().split('T')[0],
+        url: finalUrl
+      };
+
+      const updatedProperty = {
+        ...property,
+        documents: [...(property.documents || []), newDoc]
+      };
+
+      await updateProperty(updatedProperty);
+      
+      // Reset form
+      setNewDocName('');
+      setNewDocType('Otro');
+      setFileToUpload(null);
+      const fileInput = document.getElementById('doc-file-input') as HTMLInputElement;
+      if(fileInput) fileInput.value = '';
+
+    } catch (error: any) {
+      console.error("Error uploading:", error);
+      alert(`Error al subir documento: ${error.message || 'Inténtalo de nuevo.'}`);
+    } finally {
+      setIsUploading(false);
+    }
   };
 
   const handleDeleteDocument = (docId: string) => {
     if(!confirm("¿Seguro que quieres borrar este documento?")) return;
     
+    // Nota: Para una limpieza completa deberíamos borrar también el archivo de Storage,
+    // pero mantenemos la referencia simple para no complicar el código base.
     const updatedProperty = {
       ...property,
       documents: property.documents.filter(d => d.id !== docId)
@@ -135,18 +159,24 @@ const DocumentsModal: React.FC<DocumentsModalProps> = ({ property, onClose }) =>
                  <input 
                    id="doc-file-input"
                    type="file" 
+                   // Aceptamos PDFs e imágenes
                    accept="image/*,application/pdf"
-                   onChange={handleFileUpload}
+                   onChange={handleFileSelect}
                    className="block w-full text-sm text-slate-500 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
                  />
-                 {isCompressing && <span className="text-xs text-blue-600 flex items-center mt-1"><Loader2 size={12} className="animate-spin mr-1"/> Optimizando archivo...</span>}
+                 {fileToUpload && (
+                   <div className="mt-1 text-xs text-slate-500 flex items-center">
+                      <span className="font-medium truncate max-w-[200px]">{fileToUpload.name}</span>
+                      <span className="ml-2 bg-slate-200 px-1 rounded">{(fileToUpload.size / 1024 / 1024).toFixed(2)} MB</span>
+                   </div>
+                 )}
                </div>
                <button 
                  type="submit" 
-                 disabled={!newDocName || isCompressing || !newDocFile}
-                 className="px-4 py-2 bg-slate-900 text-white text-sm font-medium rounded-lg hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap"
+                 disabled={!newDocName || isUploading || !fileToUpload}
+                 className="px-4 py-2 bg-slate-900 text-white text-sm font-medium rounded-lg hover:bg-slate-800 disabled:opacity-50 whitespace-nowrap flex items-center"
                >
-                 Guardar
+                 {isUploading ? <><Loader2 size={16} className="animate-spin mr-2"/> Subiendo...</> : 'Guardar'}
                </button>
             </div>
           </form>
